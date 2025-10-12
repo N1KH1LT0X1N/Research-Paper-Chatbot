@@ -1,1 +1,4 @@
 .env
+whatsapp_bot.db
+__pycache__/
+*.pyc
