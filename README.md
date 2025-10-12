@@ -1,6 +1,16 @@
-# WhatsApp Bot (Gemini)
+# Research-Paper-Chatbot — WhatsApp Bot (Gemini)
 
-This Flask-based WhatsApp bot uses Twilio for messaging and Google Gemini for text generation.
+Lightweight Flask-based WhatsApp assistant for semantic search, Q&A and concise summaries of research papers. The bot uses Twilio for WhatsApp messaging and Google Gemini for generation.
+
+## Live demo (deployed)
+
+- URL: https://research-paper-chatbot-2.onrender.com
+
+## Use / Join
+
+- WhatsApp: https://wa.me/14155238886?text=join%20pocket-afternoon
+
+---
 
 ## Requirements
 
@@ -10,7 +20,7 @@ This Flask-based WhatsApp bot uses Twilio for messaging and Google Gemini for te
 
 ## Setup
 
-1. Create a `.env` in `whatsapp-bot/`:
+1. Create a `.env` in `whatsapp-bot/` (or at repo root if you run the scripts directly):
 
 ```
 TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
@@ -36,13 +46,13 @@ python -u whatsapp-bot/bot_demo.py
 python -u whatsapp-bot/research_bot.py
 ```
 
-4. Expose locally for Twilio webhook using ngrok (example):
+5. Expose locally for Twilio webhook using ngrok (example):
 
 ```
 ngrok http 5000
 ```
 
-5. In Twilio Console, set the WhatsApp sandbox webhook for `WHEN A MESSAGE COMES IN` to:
+6. In Twilio Console, set the WhatsApp sandbox webhook for `WHEN A MESSAGE COMES IN` to:
 
 ```
 https://<your-ngrok-subdomain>.ngrok.io/text  # for bot_demo.py
