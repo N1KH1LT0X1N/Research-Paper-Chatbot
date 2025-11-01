@@ -5,7 +5,7 @@
 ![Flask](https://img.shields.io/badge/flask-3.0+-lightgrey.svg)
 ![Status](https://img.shields.io/badge/status-active-success.svg)
 
-> AI-powered WhatsApp bot for research paper search, Q&A, and structured summaries via Google Gemini
+> AI-powered WhatsApp bot for research paper search, Q&A, and structured summaries via Google Gemini.
 
 Lightweight Flask-based WhatsApp assistant that helps you discover, understand, and learn from research papers through conversational AI. Search papers from Semantic Scholar and arXiv, get structured summaries, and test your understanding with interactive Q&A.
 
@@ -394,3 +394,4 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
   <a href="https://wa.me/14155238886?text=join%20pocket-afternoon">💬 Try on WhatsApp</a> •
   <a href="https://github.com/N1KH1LT0X1N/Research-Paper-Chatbot/issues">🐛 Report Bug</a>
 </p>
+
