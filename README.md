@@ -1,11 +1,21 @@
 # 📚 Research-Paper-Chatbot
 
-![Python](https://img.shields.io/badge/python-3.9+-blue.svg)
+![Python](https://img.shields.io/badge/python-3.11+-blue.svg)
 ![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)
-![Flask](https://img.shields.io/badge/flask-3.0+-lightgrey.svg)
-![Status](https://img.shields.io/badge/status-active-success.svg)
+![FastAPI](https://img.shields.io/badge/fastapi-async-009688.svg)
+![Status](https://img.shields.io/badge/status-refactoring-yellow.svg)
 
 > AI-powered WhatsApp bot for research paper search, Q&A, and structured summaries via Google Gemini.
+
+## 🔄 Repository Restructuring in Progress
+
+**Note**: This repository has been refactored into a clean, modular architecture. See **[STRUCTURE.md](STRUCTURE.md)** for the new organization.
+
+- **v2.0 Features**: See [README-ASYNC.md](README-ASYNC.md) for complete async implementation
+- **New Structure**: Modular architecture with FastAPI, async SQLAlchemy, Redis
+- **Legacy Code**: Original monolithic code preserved in `legacy/` directory
+
+---
 
 Lightweight Flask-based WhatsApp assistant that helps you discover, understand, and learn from research papers through conversational AI. Search papers from Semantic Scholar and arXiv, get structured summaries, and test your understanding with interactive Q&A.
 
