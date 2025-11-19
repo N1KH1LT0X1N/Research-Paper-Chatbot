@@ -12,8 +12,9 @@ from twilio.rest import Client as TwilioClient
 import uvicorn
 
 from app.core.config import settings, logger
-from app.core.database import init_db, get_db, get_session, update_session, log_message
+from app.core.database import init_db, get_db, log_message
 from app.core.cache import cache
+from app.services.message_handler import handle_message
 
 # Validate settings on startup
 settings.validate()
@@ -110,99 +111,7 @@ def split_message(text: str, limit: int = 1500) -> list[str]:
     return chunks
 
 
-# ---------------------------
-# Intent Detection
-# ---------------------------
-
-import re
-
-def detect_intent(text: str) -> str:
-    """Detect user intent from message"""
-    text_lower = text.lower()
-
-    # Help and commands
-    if re.search(r'\bhelp\b', text_lower):
-        return "help"
-    if re.search(r'\b(status|where am i)\b', text_lower):
-        return "status"
-    if re.search(r'\b(reset|clear)\b', text_lower):
-        return "reset"
-
-    # Q&A
-    if re.search(r'\b(ready for q.?a|start qna|let.?s do q.?a)\b', text_lower):
-        return "qna_start"
-    if re.search(r'\bskip\b', text_lower):
-        return "qna_skip"
-    if re.search(r'\brepeat\b', text_lower):
-        return "qna_repeat"
-
-    # Paper selection
-    if re.search(r'\b(select|choose|pick)\s+\d+\b', text_lower):
-        return "selection"
-
-    # Paper search (URLs, DOIs, or keywords)
-    if re.search(r'https?://|arxiv|\d{4}\.\d{4,5}|10\.\d{4,}/', text):
-        return "paper"
-
-    # Content-based search (3+ words)
-    words = [w for w in re.findall(r'\b\w{3,}\b', text_lower)
-             if w not in {'the', 'is', 'a', 'an', 'of', 'and', 'or', 'to'}]
-    if len(words) >= 3:
-        return "paper"
-
-    return "ambiguous"
-
-
-# ---------------------------
-# Message Handlers (Simplified)
-# ---------------------------
-
-async def handle_message(user_id: str, text: str, db: AsyncSession) -> str:
-    """Main message handler - simplified version"""
-
-    # Get user session
-    session = await get_session(user_id, db)
-    intent = detect_intent(text)
-
-    # Help
-    if intent == "help":
-        return """📚 *Research Paper Bot - Help*
-
-🔍 *Search:* Send paper title, keyword, or link
-📄 *Select:* Reply 'select 1' after search
-💬 *Q&A:* Type 'start qna' to test understanding
-
-Commands: help | status | reset"""
-
-    # Status
-    if intent == "status":
-        mode = session.mode or "browsing"
-        paper = session.selected_paper_title or "None"
-        return f"📍 *Status*\nMode: {mode}\nCurrent paper: {paper}"
-
-    # Reset
-    if intent == "reset":
-        await update_session(
-            user_id, db,
-            mode="browsing",
-            qna_active=False,
-            selected_paper_id=None
-        )
-        return "✨ Session reset! Send a paper title to search."
-
-    # For now, return a friendly message for other intents
-    # In production, this would connect to the full async_research_bot.py logic
-    return f"""🤖 *Research Paper Chatbot v2.0*
-
-I received: "{text}"
-
-🔧 *Note:* Full functionality is being modularized.
-For now, try:
-- 'help' - See commands
-- 'status' - Check your session
-- 'reset' - Start over
-
-Full paper search, Q&A, and AI features coming soon!"""
+# Message handler is now in app.services.message_handler
 
 
 # ---------------------------
