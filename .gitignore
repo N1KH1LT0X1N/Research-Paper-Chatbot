@@ -53,6 +53,10 @@ venv.bak/
 *.sublime-project
 *.sublime-workspace
 
+# Skills (from AI agent)
+/skills
+.github/skills/
+
 # Testing
 .pytest_cache/
 .coverage

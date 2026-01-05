@@ -26,12 +26,18 @@ def client():
 
 
 @pytest.fixture
-def mock_gemini_response(monkeypatch):
-    """Mock Gemini API responses."""
+def mock_groq_response(monkeypatch):
+    """Mock Groq API responses."""
     def mock_generate(*args, **kwargs):
         return "This is a mock AI response for testing purposes."
     
-    monkeypatch.setattr("research_bot.gemini_generate_text", mock_generate)
+    monkeypatch.setattr("research_bot.groq_generate_text", mock_generate)
+
+
+@pytest.fixture
+def mock_gemini_response(mock_groq_response):
+    """Alias for backward compatibility."""
+    pass
 
 
 @pytest.fixture

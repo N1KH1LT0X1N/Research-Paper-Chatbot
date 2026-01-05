@@ -54,7 +54,7 @@ We take the security of Research-Paper-Chatbot seriously. If you believe you hav
 ### API Keys and Secrets
 
 - **Never commit `.env` files** to version control
-- **Use strong, unique API keys** for all services (Twilio, Google Gemini)
+- **Use strong, unique API keys** for all services (Twilio, Groq)
 - **Rotate keys regularly** (at least every 90 days)
 - **Use environment variables** for all sensitive configuration
 - **Limit API key permissions** to only what's necessary
@@ -84,7 +84,7 @@ We take the security of Research-Paper-Chatbot seriously. If you believe you hav
 - **Don't store sensitive user information** without consent
 - **Comply with GDPR/CCPA** if applicable to your users
 
-### Google Gemini API
+### Groq API
 
 - **Monitor API usage** to detect anomalies
 - **Set usage quotas** to prevent unexpected costs
@@ -107,8 +107,8 @@ We take the security of Research-Paper-Chatbot seriously. If you believe you hav
    - Consider adding user verification for sensitive deployments
 
 3. **Rate Limiting**:
-   - Not currently implemented in the application
-   - Rely on Twilio's built-in rate limiting
+   - Twilio webhook validation is configurable via `TWILIO_VALIDATE_WEBHOOK`
+   - Response caching helps reduce API calls
    - Consider adding application-level rate limiting for production
 
 4. **Input Validation**:

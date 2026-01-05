@@ -1,6 +1,6 @@
 flask
 python-dotenv
 twilio
-google-generativeai
 requests
 gunicorn
+cachetools>=5.3.0

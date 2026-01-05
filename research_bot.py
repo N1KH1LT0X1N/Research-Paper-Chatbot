@@ -2,19 +2,20 @@ import os
 import re
 import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+import logging
+import hashlib
+import time
+from functools import wraps
 from dotenv import load_dotenv
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.rest import Client
-
-try:
-    import google.generativeai as genai  # Optional; will be configured if GEMINI_API_KEY exists
-except Exception:  # pragma: no cover - optional dependency at runtime
-    genai = None  # type: ignore
+from twilio.request_validator import RequestValidator
+from cachetools import TTLCache
 
 
 # ---------------------------
@@ -24,12 +25,17 @@ except Exception:  # pragma: no cover - optional dependency at runtime
 load_dotenv()
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "whatsapp_bot.db")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 TEMPERATURE = float(os.getenv("TEMPERATURE", "0.5"))
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_TIMEOUT = int(os.getenv("GROQ_TIMEOUT", "30"))
+MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "1024"))
 
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_WHATSAPP_FROM = os.getenv("TWILIO_WHATSAPP_FROM")  # e.g., whatsapp:+14155238886
+TWILIO_VALIDATE_WEBHOOK = os.getenv("TWILIO_VALIDATE_WEBHOOK", "true").lower() == "true"
+TWILIO_WEBHOOK_URL = os.getenv("TWILIO_WEBHOOK_URL", "")
 
 if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
     missing = []
@@ -43,15 +49,52 @@ if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
 
 twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
-# Configure Gemini if available
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if GEMINI_API_KEY and genai is not None:
-    try:
-        genai.configure(api_key=GEMINI_API_KEY)
-    except Exception:
-        genai = None  # disable if config fails
-
 app = Flask(__name__)
+
+# ---------------------------
+# Logging Configuration
+# ---------------------------
+logger = logging.getLogger("research_bot")
+logger.setLevel(logging.INFO)
+_handler = logging.StreamHandler()
+_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+logger.addHandler(_handler)
+
+# ---------------------------
+# Response Caching (TTL: 1 hour)
+# ---------------------------
+_summary_cache: TTLCache = TTLCache(maxsize=100, ttl=3600)
+_qna_cache: TTLCache = TTLCache(maxsize=100, ttl=3600)
+_section_cache: TTLCache = TTLCache(maxsize=200, ttl=3600)
+
+def _cache_key(*args: str) -> str:
+    """Generate a stable cache key from arguments."""
+    return hashlib.sha256(":".join(str(a) for a in args).encode()).hexdigest()[:16]
+
+# ---------------------------
+# Twilio Webhook Validation
+# ---------------------------
+def validate_twilio_request(f):
+    """Decorator to validate Twilio webhook signatures."""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not TWILIO_VALIDATE_WEBHOOK:
+            return f(*args, **kwargs)
+        
+        if not TWILIO_AUTH_TOKEN:
+            logger.error("TWILIO_AUTH_TOKEN not set, cannot validate webhook")
+            return "Unauthorized", 403
+        
+        validator = RequestValidator(TWILIO_AUTH_TOKEN)
+        url = TWILIO_WEBHOOK_URL or request.url
+        signature = request.headers.get("X-Twilio-Signature", "")
+        
+        if not validator.validate(url, request.form.to_dict(), signature):
+            logger.warning(f"Invalid Twilio signature from {request.remote_addr}")
+            return "Forbidden", 403
+        
+        return f(*args, **kwargs)
+    return decorated_function
 
 
 # ---------------------------
@@ -115,7 +158,7 @@ def log_message(user_id: str, role: str, message: str) -> None:
     conn = get_db_connection()
     conn.execute(
         "INSERT INTO logs (user_id, role, message, created_at) VALUES (?, ?, ?, ?)",
-        (user_id, role, message, datetime.utcnow().isoformat()),
+        (user_id, role, message, datetime.now(timezone.utc).isoformat()),
     )
     conn.commit()
     conn.close()
@@ -128,7 +171,7 @@ def get_session(user_id: str) -> sqlite3.Row:
     if row is None:
         conn.execute(
             "INSERT INTO sessions (user_id, updated_at) VALUES (?, ?)",
-            (user_id, datetime.utcnow().isoformat()),
+            (user_id, datetime.now(timezone.utc).isoformat()),
         )
         conn.commit()
         cur = conn.execute("SELECT * FROM sessions WHERE user_id=?", (user_id,))
@@ -147,7 +190,7 @@ def update_session(user_id: str, **kwargs: Any) -> None:
     conn = get_db_connection()
     conn.execute(
         f"UPDATE sessions SET {columns}, updated_at=? WHERE user_id=?",
-        [*kwargs.values(), datetime.utcnow().isoformat(), user_id],
+        [*kwargs.values(), datetime.now(timezone.utc).isoformat(), user_id],
     )
     conn.commit()
     conn.close()
@@ -285,39 +328,107 @@ def extract_query_from_text(text: str) -> str:
 
 
 # ---------------------------
-# AI helpers (Gemini optional)
+# AI helpers (Groq LLM)
 # ---------------------------
 
-def gemini_generate_text(prompt: str, temperature: float = TEMPERATURE) -> Optional[str]:
-    if not (genai and GEMINI_API_KEY):
+def groq_generate_text(prompt: str, temperature: float = TEMPERATURE) -> Optional[str]:
+    """Generate text using Groq API with retry logic and logging."""
+    if not GROQ_API_KEY:
+        logger.warning("GROQ_API_KEY not configured, LLM features disabled")
         return None
-    try:
-        model = genai.GenerativeModel(GEMINI_MODEL)
-        resp = model.generate_content(prompt, generation_config={"temperature": temperature})
-        return getattr(resp, "text", "").strip() or None
-    except Exception:
-        return None
+    
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": GROQ_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": temperature,
+        "max_tokens": MAX_OUTPUT_TOKENS,
+    }
+    
+    for attempt in range(2):  # 1 retry
+        start_time = time.time()
+        try:
+            resp = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=GROQ_TIMEOUT,
+            )
+            latency_ms = (time.time() - start_time) * 1000
+            
+            if resp.status_code == 429:
+                logger.warning(f"Groq rate limit hit, attempt {attempt + 1}")
+                if attempt == 0:
+                    time.sleep(2)  # Brief backoff before retry
+                    continue
+                return None
+            
+            resp.raise_for_status()
+            data = resp.json()
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            
+            # Log success
+            usage = data.get("usage", {})
+            logger.info(
+                f"Groq call: {latency_ms:.0f}ms, "
+                f"tokens={usage.get('total_tokens', 'N/A')}, "
+                f"model={GROQ_MODEL}"
+            )
+            
+            return content.strip() if content else None
+            
+        except requests.exceptions.Timeout:
+            logger.warning(f"Groq timeout on attempt {attempt + 1}")
+            if attempt == 0:
+                continue
+            return None
+        except requests.exceptions.RequestException as e:
+            latency_ms = (time.time() - start_time) * 1000
+            logger.error(f"Groq API error: {type(e).__name__}: {e}, latency={latency_ms:.0f}ms")
+            if attempt == 0:
+                continue
+            return None
+    return None
 
 
 def summarize_paper(title: str, abstract: str, url: str, detailed: bool = False) -> str:
     """Return a structured summary with sections: Introduction, Methodology, Results, Conclusions.
-    If detailed=True, allow a bit more depth.
+    If detailed=True, allow a bit more depth. Uses caching.
     """
-    style = (
-        "Write a concise, easy-to-read summary divided into exactly these sections: "
-        "Introduction, Methodology, Results, Conclusions."
-    )
-    if detailed:
-        style += " Increase detail moderately while remaining clear and brief."
-    else:
-        style += " Keep it brief (3-5 sentences per section)."
+    # Check cache first
+    cache_key = _cache_key(title, abstract, str(detailed))
+    if cache_key in _summary_cache:
+        logger.debug(f"Cache hit for summary: {cache_key}")
+        return _summary_cache[cache_key]
+    
+    # Llama-optimized prompt with explicit format
+    sentence_count = "4-6 sentences" if detailed else "2-4 sentences"
+    prompt = f"""You are a research paper summarizer. Summarize the paper below.
 
-    prompt = (
-        f"{style}\n\nTitle: {title}\nURL: {url}\nAbstract: {abstract}\n\n"
-        "Use markdown subheadings '## Introduction', '## Methodology', '## Results', '## Conclusions'."
-    )
-    ai_resp = gemini_generate_text(prompt)
+TASK: Create a structured summary with exactly 4 sections.
+FORMAT: Use these exact markdown headers:
+## Introduction
+## Methodology
+## Results
+## Conclusions
+
+REQUIREMENTS:
+- Each section: {sentence_count}
+- Be factual and precise
+- If information is not in the abstract, write "Not specified in abstract."
+
+PAPER:
+Title: {title}
+Abstract: {abstract}
+
+OUTPUT (respond only with the formatted summary):"""
+
+    ai_resp = groq_generate_text(prompt)
     if ai_resp:
+        _summary_cache[cache_key] = ai_resp
         return ai_resp
     # Fallback structured summary if AI not configured
     def take(sn: str) -> str:
@@ -411,31 +522,67 @@ def compact_summary_to_single_message(title: str, year: Optional[int], authors: 
 
 
 def generate_qna_items(title: str, source_text: str, n: int = 3) -> List[Dict[str, Any]]:
-    """Generate Q&A based on the structured summary (preferred) or abstract/title fallback."""
-    prompt = (
-        "From the following paper summary, create Q&A items. "
-        "Return numbered questions, and for each question include a line 'Answer keywords: ...' "
-        "with 3-5 short keywords. Keep questions focused and unambiguous.\n\n"
-        f"Paper: {title}\n\nSummary:\n{source_text}\n\nCount: {n}"
-    )
-    ai_resp = gemini_generate_text(prompt)
+    """Generate Q&A based on the structured summary (preferred) or abstract/title fallback. Uses caching."""
+    # Check cache first
+    cache_key = _cache_key(title, source_text, str(n))
+    if cache_key in _qna_cache:
+        logger.debug(f"Cache hit for Q&A: {cache_key}")
+        return _qna_cache[cache_key]
+    
+    # Llama-optimized prompt with few-shot example
+    prompt = f"""You are generating quiz questions about a research paper.
+
+TASK: Create exactly {n} questions with answer keywords.
+
+FORMAT (use this exact format for each):
+1. [Question text]
+Answer keywords: keyword1, keyword2, keyword3
+
+2. [Question text]
+Answer keywords: keyword1, keyword2, keyword3
+
+EXAMPLE:
+1. What architecture does the paper propose?
+Answer keywords: transformer, attention, encoder-decoder
+
+REQUIREMENTS:
+- Questions should test understanding of key concepts
+- Keywords should be 3-5 single words from the paper
+- Make questions specific and answerable
+
+PAPER: {title}
+
+SUMMARY:
+{source_text}
+
+QUESTIONS:"""
+
+    ai_resp = groq_generate_text(prompt)
     items: List[Dict[str, Any]] = []
     if ai_resp:
-        # Parse very simply: lines like '1. Question ...' and 'Answer keywords: a, b, c'
+        # Robust parsing for Llama output variations
         lines = [l.strip() for l in ai_resp.splitlines() if l.strip()]
         q: Optional[str] = None
         for line in lines:
-            if re.match(r"^\d+\.", line):
+            # Match variations: "1.", "1)", "Q1:", "Question 1:"
+            q_match = re.match(r'^(?:\d+[.\):]|Q\d+:?|Question\s+\d+:?)\s*(.+)', line, re.I)
+            # Match variations: "Answer keywords:", "Keywords:", "Key words:"
+            kw_match = re.match(r'^(?:answer\s+)?key\s*words?:?\s*(.+)', line, re.I)
+            
+            if q_match:
                 if q:
-                    # push previous without keywords
                     items.append({"q": q, "a_keywords": []})
-                q = re.sub(r"^\d+\.\s*", "", line)
-            elif line.lower().startswith("answer keywords:") and q:
-                kws = [k.strip().lower() for k in line.split(":", 1)[1].split(",") if k.strip()]
+                q = q_match.group(1).strip()
+            elif kw_match and q:
+                kws = [k.strip().lower() for k in kw_match.group(1).split(",") if k.strip()]
                 items.append({"q": q, "a_keywords": kws})
                 q = None
         if q:
             items.append({"q": q, "a_keywords": []})
+    
+    if items:
+        _qna_cache[cache_key] = items[:n]
+        return items[:n]
     if not items:
         # Fallback deterministic items from abstract/title
         base_kws = [w.lower() for w in re.findall(r"[A-Za-z]{5,}", source_text)][:8]
@@ -463,9 +610,9 @@ def evaluate_answer(user_text: str, a_keywords: List[str]) -> Tuple[int, str]:
 # ---------------------------
 
 QNA_START_PATTERNS = [
-    re.compile(r"\bready\s*for\s*q\s*&\s*a\b", re.I),
-    re.compile(r"let'?s\s*do\s*q\s*&\s*a", re.I),
-    re.compile(r"\bstart\s*qna\b", re.I),
+    re.compile(r"\bready\s*for\s*(?:q\s*[&a]?\s*a|qna)\b", re.I),
+    re.compile(r"(?:let'?s\s*)?(?:do\s+)?(?:q\s*[&a]?\s*a|qna)", re.I),
+    re.compile(r"\b(?:start\s+)?(?:q\s*[&a]?\s*a|qna)\b", re.I),
 ]
 
 
@@ -708,11 +855,35 @@ def handle_qna(user_id: str, text: str) -> str:
             section = sec_m.group(1).lower()
             sec_map = {"intro": "Introduction", "introduction": "Introduction", "method": "Methodology", "methodology": "Methodology", "results": "Results", "conclusion": "Conclusions", "conclusions": "Conclusions"}
             target = sec_map.get(section, "Introduction")
-            prompt = (
-                f"Provide a deeper but concise explanation only for the section '{target}' of the paper below.\n"
-                f"Keep within 6-8 sentences.\n\nTitle: {title}\nAbstract: {abstract}\n"
-            )
-            detail = gemini_generate_text(prompt) or "Detailed section unavailable right now."
+            
+            # Check section cache
+            section_cache_key = _cache_key(title, abstract, target)
+            if section_cache_key in _section_cache:
+                logger.debug(f"Cache hit for section: {section_cache_key}")
+                return f"## {target}\n{_section_cache[section_cache_key]}"
+            
+            # Llama-optimized prompt for section details
+            prompt = f"""You are explaining a research paper section in detail.
+
+SECTION TO EXPLAIN: {target}
+
+CONSTRAINTS:
+- Write exactly 6-8 sentences
+- Focus ONLY on {target.lower()} aspects
+- Be specific and technical but accessible
+- Base explanation only on the abstract provided
+
+PAPER:
+Title: {title}
+Abstract: {abstract}
+
+{target.upper()} EXPLANATION:"""
+            
+            detail = groq_generate_text(prompt)
+            if detail:
+                _section_cache[section_cache_key] = detail
+            else:
+                detail = "Detailed section unavailable right now."
             return f"## {target}\n{detail}"
         else:
             detail = summarize_paper(title, abstract, url="", detailed=True)
@@ -786,7 +957,39 @@ def root() -> str:
     return "Research Paper WhatsApp Bot is running."
 
 
+@app.route("/health", methods=["GET"])
+def health_check():
+    """Health check endpoint for monitoring and load balancers."""
+    health = {
+        "status": "healthy",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "checks": {}
+    }
+    
+    # Check 1: Database connectivity
+    try:
+        conn = get_db_connection()
+        conn.execute("SELECT 1")
+        conn.close()
+        health["checks"]["database"] = "ok"
+    except Exception as e:
+        health["checks"]["database"] = f"error: {str(e)}"
+        health["status"] = "degraded"
+    
+    # Check 2: Groq API key configured
+    health["checks"]["groq_configured"] = "ok" if GROQ_API_KEY else "missing"
+    if not GROQ_API_KEY:
+        health["status"] = "degraded"
+    
+    # Check 3: Twilio configured
+    health["checks"]["twilio_configured"] = "ok" if (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN) else "missing"
+    
+    status_code = 200 if health["status"] == "healthy" else 503
+    return json.dumps(health), status_code, {"Content-Type": "application/json"}
+
+
 @app.route("/whatsapp", methods=["POST"])
+@validate_twilio_request
 def whatsapp_webhook():
     init_db()  # ensure tables exist
     from_number = request.form.get("From", "")
